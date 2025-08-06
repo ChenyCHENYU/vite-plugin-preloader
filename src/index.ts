@@ -27,12 +27,14 @@ export default function preloaderPlugin(options: PreloaderOptions): Plugin {
       if (id === VIRTUAL_MODULE_ID) {
         return RESOLVED_VIRTUAL_MODULE_ID
       }
+      return null // 🔧 修复：明确返回 null
     },
 
     load(id) {
       if (id === RESOLVED_VIRTUAL_MODULE_ID) {
         return generator.generateRuntime()
       }
+      return null // 🔧 修复：明确返回 null
     },
 
     // 🎨 HTML 转换（修复类型错误）
@@ -44,7 +46,7 @@ export default function preloaderPlugin(options: PreloaderOptions): Plugin {
           `<div id="app">\n    ${inject}`
         )
       }
-      return html
+      return html // 🔧 修复：确保总是返回 html
     },
 
     // 🔥 HMR 支持
@@ -56,6 +58,7 @@ export default function preloaderPlugin(options: PreloaderOptions): Plugin {
         })
         return []
       }
+      return undefined // 🔧 修复：明确返回 undefined
     }
   }
 }

@@ -1,0 +1,51 @@
+{
+  "compilerOptions": {
+    // 🎯 基础配置
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+
+    // 📦 输出配置
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "./dist",
+
+    // 🔍 模块解析
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+
+    // 🛡️ 类型检查
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitAny": true,
+    "skipLibCheck": true,
+
+    // 🎨 其他选项
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+
+    // 📝 路径映射（如果需要）
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  },
+
+  // 📂 包含的文件
+  "include": ["src/**/*", "types/**/*"],
+
+  // 🚫 排除的文件
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts"],
+
+  // 🔧 TypeScript 编译选项
+  "ts-node": {
+    "esm": true
+  }
+}

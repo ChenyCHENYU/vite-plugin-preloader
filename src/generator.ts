@@ -2,7 +2,7 @@
 // 🛠️ src/generator.ts - 代码生成器
 // ============================================================================
 
-import type { PreloaderOptions, PreloadRoute } from './types'
+import type { PreloaderOptions } from './types'
 import { runtimeTemplate } from './runtime'
 
 export class CodeGenerator {
@@ -25,6 +25,18 @@ export class CodeGenerator {
    */
   private processRoutes(): any[] {
     return this.options.routes.map(route => {
+      // 处理字符串输入
+      if (typeof route === 'string') {
+        const componentPath = this.inferComponentPath(route)
+        return {
+          path: route,
+          component: `() => import('${componentPath}')`,
+          reason: '自动推断的预加载页面',
+          priority: 2
+        }
+      }
+      
+      // 处理对象输入
       const componentPath = route.component || this.inferComponentPath(route.path)
       return {
         path: route.path,

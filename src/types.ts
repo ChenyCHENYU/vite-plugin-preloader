@@ -14,8 +14,8 @@ export interface PreloadRoute {
 }
 
 export interface PreloaderOptions {
-  /** 预加载路由配置 */
-  routes: PreloadRoute[]
+  /** 预加载路由配置 - 支持字符串数组或对象数组 */
+  routes: (string | PreloadRoute)[]
   /** 延迟时间（毫秒），默认 2000 */
   delay?: number
   /** 是否显示预加载状态，默认 true */
