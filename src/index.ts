@@ -4,7 +4,6 @@ import { CodeGenerator } from './generator'
 
 export default function preloaderPlugin(options: PreloaderOptions): Plugin {
   let generator: CodeGenerator
-  let config: any
   const isDev = process.env.NODE_ENV !== 'production'
   
   // 智能默认配置
@@ -22,8 +21,7 @@ export default function preloaderPlugin(options: PreloaderOptions): Plugin {
     // 🎯 设置插件执行顺序
     enforce: 'post',
     
-    configResolved(resolvedConfig) {
-      config = resolvedConfig
+    configResolved() {
       generator = new CodeGenerator(finalOptions)
       
       if (finalOptions.debug) {
