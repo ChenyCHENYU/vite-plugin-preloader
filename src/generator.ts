@@ -1,7 +1,6 @@
 // ============================================================================
 // 🛠️ src/generator.ts - 代码生成器
 // ============================================================================
-
 import type { PreloaderOptions } from './types'
 import { runtimeTemplate } from './runtime'
 
@@ -14,6 +13,10 @@ export class CodeGenerator {
   generateRuntime(): string {
     const routes = this.processRoutes()
     const options = this.processOptions()
+
+    if (options.debug) {
+      console.log('🔧 [预加载] 生成运行时代码，路由数量:', routes.length)
+    }
 
     return runtimeTemplate
       .replace('__PRELOAD_ROUTES__', JSON.stringify(routes, null, 2))
@@ -51,11 +54,14 @@ export class CodeGenerator {
    * 处理选项配置
    */
   private processOptions() {
+    // 智能默认配置
+    const isDev = process.env.NODE_ENV !== 'production'
+    
     return {
-      delay: this.options.delay || 2000,
-      showStatus: this.options.showStatus !== false,
-      statusPosition: this.options.statusPosition || 'bottom-right',
-      debug: this.options.debug || false
+      delay: this.options.delay ?? 2000, // 默认2秒
+      showStatus: this.options.showStatus ?? true, // 默认显示状态
+      statusPosition: this.options.statusPosition ?? 'bottom-right', // 默认右下角
+      debug: this.options.debug ?? isDev // 开发环境默认开启调试，生产环境默认关闭
     }
   }
 
@@ -63,16 +69,24 @@ export class CodeGenerator {
    * 推断组件路径
    */
   private inferComponentPath(routePath: string): string {
-    const cleanPath = routePath.replace(/^\//, '').replace(/\//g, '-')
-    return `@/views/${cleanPath}/index.vue`
+    const cleanPath = routePath.replace(/^\//, '')
+    
+    // 如果是 demo/ 开头的路径，保持原有结构
+    if (cleanPath.startsWith('demo/')) {
+      return `@/views/${cleanPath}/index.vue`
+    }
+    
+    // 其他路径的处理
+    const pathSegments = cleanPath.split('/')
+    return `@/views/${pathSegments.join('/')}/index.vue`
   }
 
   /**
-   * 生成HTML注入代码
+   * 生成注入到 HTML 头部的脚本
    */
   generateHtmlInject(): string {
-    if (this.options.showStatus === false) return ''
-    
-    return '<preloader-status></preloader-status>'
+    return `<script type="module">
+${this.generateRuntime()}
+</script>`
   }
 }
