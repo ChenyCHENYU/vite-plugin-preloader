@@ -14,11 +14,13 @@
 ## 📦 安装
 
 ```bash
-npm install vite-plugin-preloader -D
+npm install vite-plugin-preloader
 # 或
-yarn add vite-plugin-preloader -D
+yarn add vite-plugin-preloader
 # 或
-pnpm add vite-plugin-preloader -D
+pnpm add vite-plugin-preloader
+# 或
+bun add vite-plugin-preloader
 ```
 
 ## 🚀 使用
