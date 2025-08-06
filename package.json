@@ -1,6 +1,6 @@
 {
   "name": "vite-plugin-preloader",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "🚀 Vite plugin for intelligent route preloading - 智能路由预加载插件",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
