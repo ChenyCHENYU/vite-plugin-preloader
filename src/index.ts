@@ -1,12 +1,10 @@
-// ============================================================================
-// 🚀 src/index.ts - 主插件文件
-// ============================================================================
 import type { Plugin } from 'vite'
 import type { PreloaderOptions } from './types'
 import { CodeGenerator } from './generator'
 
 export default function preloaderPlugin(options: PreloaderOptions): Plugin {
   let generator: CodeGenerator
+  let config: any
   const isDev = process.env.NODE_ENV !== 'production'
   
   // 智能默认配置
@@ -24,28 +22,18 @@ export default function preloaderPlugin(options: PreloaderOptions): Plugin {
     // 🎯 设置插件执行顺序
     enforce: 'post',
     
-    configResolved() {
+    configResolved(resolvedConfig) {
+      config = resolvedConfig
       generator = new CodeGenerator(finalOptions)
       
       if (finalOptions.debug) {
-        console.log(`🚀 [预加载插件] 已启用，配置了 ${finalOptions.routes.length} 个路由`)
-        console.log('📋 [预加载插件] 路由列表:', finalOptions.routes)
-        console.log('⚙️ [预加载插件] 配置选项:', {
-          delay: finalOptions.delay,
-          showStatus: finalOptions.showStatus,
-          statusPosition: finalOptions.statusPosition,
-          debug: finalOptions.debug
-        })
+        console.log(`🚀 [预加载插件] 已启用，预加载 ${finalOptions.routes.length} 个页面，详情请查看浏览器控制台`)
       }
     },
 
     // 🎨 HTML 转换 - 直接注入脚本到 HTML
     transformIndexHtml(html) {
       const inject = generator.generateHtmlInject()
-      
-      if (finalOptions.debug) {
-        console.log('🎨 [预加载插件] 注入预加载脚本到 HTML')
-      }
       
       // 注入到 head 标签末尾
       return html.replace('</head>', `${inject}\n</head>`)
