@@ -1,7 +1,7 @@
 {
   "name": "vite-plugin-preloader",
-  "version": "2.0.1",
-  "description": "🚀 Vite plugin for intelligent route preloading - 智能路由预加载插件",
+  "version": "2.0.2",
+  "description": "Vite 智能路由预加载插件 - dev 注入 modulepreload，build 注入 prefetch",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
@@ -14,22 +14,19 @@
   },
   "files": [
     "dist",
+    "docs",
     "README.md",
-    "CHANGELOG.md"
+    "LICENSE"
   ],
   "keywords": [
     "vite",
     "vite-plugin",
     "preload",
-    "vue",
-    "vue3",
-    "performance",
-    "route",
+    "prefetch",
+    "modulepreload",
     "lazy-loading",
-    "optimization",
-    "build-tool",
-    "intelligent",
-    "preloading"
+    "routes",
+    "performance"
   ],
   "scripts": {
     "build": "tsup",
@@ -59,11 +56,7 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "author": {
-    "name": "ChenYu",
-    "email": "ycyplus@gmail.com",
-    "url": "https://github.com/ChenyCHENYU"
-  },
+  "author": "CHENY <ycyplus@gmail.com>",
   "license": "MIT",
   "homepage": "https://github.com/ChenyCHENYU/vite-plugin-preloader#readme",
   "repository": {

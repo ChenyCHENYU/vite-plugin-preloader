@@ -1,195 +1,151 @@
-# 🚀 vite-plugin-preloader
+<div align="center">
 
-> 治好你的"页面加载焦虑症"——精确控制指定路由的预加载时机，在用户点击之前静默预取重型页面，让组件切换瞬间响应。
+<img src="./docs/assets/banner.svg" alt="vite-plugin-preloader" width="100%" />
 
-[![npm version](https://img.shields.io/npm/v/vite-plugin-preloader)](https://www.npmjs.com/package/vite-plugin-preloader)
-[![Vite](https://img.shields.io/badge/Vite-5~8-646cff)](https://vitejs.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+**在用户点击之前，页面已经就绪** —— Vite 路由智能预加载插件
 
-你是否经历过这样的痛苦：
-- 📊 点击图表页面，转圈 3 秒才显示
-- 📅 打开日历组件，echarts 慢慢加载
-- 💸 用户等不及直接关闭页面
+[![npm version](https://img.shields.io/npm/v/vite-plugin-preloader?style=flat-square&color=818CF8&labelColor=0B1020)](https://www.npmjs.com/package/vite-plugin-preloader)
+[![npm downloads](https://img.shields.io/npm/dm/vite-plugin-preloader?style=flat-square&color=22D3EE&labelColor=0B1020)](https://www.npmjs.com/package/vite-plugin-preloader)
+[![License](https://img.shields.io/badge/License-MIT-C084FC?style=flat-square&labelColor=0B1020)](./LICENSE)
+[![Vite](https://img.shields.io/badge/Vite-5%20%E2%80%93%208-646CFF?style=flat-square&labelColor=0B1020&logo=vite&logoColor=white)](https://vitejs.dev/)
+[![Node](https://img.shields.io/badge/Node-%E2%89%A5%2018-5FA04E?style=flat-square&labelColor=0B1020&logo=node.js&logoColor=white)](https://nodejs.org/)
 
-**别再让用户等待了！** 这个插件在构建阶段将路由组件映射到真实 chunk，向 HTML 注入 `<link rel="prefetch">` 标签，浏览器空闲时自动拉取目标资源；配合状态 UI 和调试工具，帮你精确控制哪些页面需要提前预取、哪些不需要。
+[安装](#安装) · [快速开始](#快速开始) · [配置选项](#配置选项) · [工作原理](#工作原理) · [FAQ](#faq)
 
-## ⚡ 效果对比
+</div>
 
-```
-❌ 没有预加载：点击 → 等待 3s → 页面显示
-✅ 使用预加载：点击 → 瞬间显示（已预取到缓存）🎉
-```
+## 它解决什么问题
 
-## 🎯 核心特性
+路由懒加载把首屏做小了，代价是用户**第一次点击某个页面时**要现场下载 chunk——重型页面（报表、富文本、地图）会白屏等待。
 
-- **🌐 浏览器原生** - 使用 `<link rel="prefetch">`，由浏览器空闲时调度，零 JS 运行时开销
-- **📦 bundle 感知** - 构建时扫描 Rollup/Rolldown bundle，注入真实 chunk hash 路径，生产环境 100% 有效
-- **🛡️ 防御完善** - routes 防 undefined 崩溃、动态路由参数（`:id`）自动过滤、exclude 排除支持
-- **🔌 网络感知** - 检测省流模式 / 2G 网络，自动跳过状态 UI，不做无谓消耗
-- **🚫 SSR 安全** - SSR 构建时自动跳过，不污染服务端
-- **🎨 状态提示** - 可选的右下角进度 UI，监听 prefetch link 加载事件驱动
-- **🛠️ 调试工具** - `window.__preloaderDebug` 方便在浏览器控制台检查预加载状态
-- **🔷 完整类型** - TypeScript 类型定义与实现完全一致，支持 Vite 5 / 6 / 7 / 8
+本插件在页面空闲时提前拉取你指定的路由 chunk：
 
-## 📦 安装
+- **开发环境**：注入 `<link rel="modulepreload">`，dev server 直接管 chunk，秒级生效
+- **生产构建**：在 `generateBundle` 阶段扫描 Rollup 产物匹配真实 chunk 路径（含 hash），注入 `<link rel="prefetch">`，浏览器空闲时下载、点击即用
+- **零运行时依赖**，SSR 构建自动跳过，可选状态角标观察预加载进度
+
+## 安装
 
 ```bash
-npm i vite-plugin-preloader -D
-# or
-bun add vite-plugin-preloader -D
+pnpm add vite-plugin-preloader -D
+# 或
+npm install vite-plugin-preloader --save-dev
 ```
 
-## 🚀 快速配置
+## 快速开始
 
-### 懒人模式（推荐）
-
-```js
-// vite.config.js / vite.config.ts
+```typescript
+// vite.config.ts
+import { defineConfig } from 'vite'
 import preloader from 'vite-plugin-preloader'
 
 export default defineConfig({
   plugins: [
-    vue(),
     preloader({
-      routes: ['/dashboard', '/charts', '/calendar']
-    })
-  ]
+      routes: ['/dashboard', '/report/detail', '/editor'],
+    }),
+  ],
 })
 ```
 
-### 精细化配置
+路由组件按约定 `@/views/{path}/index.vue` 自动推断；不符合约定的路由用对象格式指定组件路径：
 
-```js
+```typescript
 preloader({
   routes: [
-    { path: '/dashboard',  reason: '主页面，必须快',         priority: 1 },
-    { path: '/charts',     reason: 'echarts 太重了',         priority: 2 },
-    { path: '/calendar',   reason: 'fullcalendar 500KB',     priority: 3 },
-    // 组件路径不在默认约定（@/views/{path}/index.vue）时手动指定
-    { path: '/editor',     component: '@/pages/editor/Editor.vue', priority: 1 }
+    '/dashboard',                                    // 自动推断 @/views/dashboard/index.vue
+    { path: '/report/detail', component: 'src/views/report/DetailPage.vue', reason: '高频入口' },
   ],
-  delay: 1500,            // 状态 UI 延迟出现（ms），不影响 prefetch 时机
-  debug: true,            // 开发时开启，控制台打印预加载信息
-  showStatus: true,       // 右下角进度提示
-  statusPosition: 'bottom-right',
-  exclude: ['/login', '/404', '/403']  // 不需要预加载的路由
+  exclude: ['/404', '/login'],
 })
 ```
 
-**就这样！** 构建后打开页面源码，你会看到：
+含 `:param` 的动态路由会被自动过滤，避免预取无意义的参数页。
 
-```html
-<!-- 由插件在构建时自动注入，路径为真实 chunk hash -->
-<link rel="prefetch" href="/assets/Dashboard-Cx8Kfm3D.js" as="script" crossorigin data-preloader="%2Fdashboard">
-<link rel="prefetch" href="/assets/Charts-DmjPl9Rb.js"    as="script" crossorigin data-preloader="%2Fcharts">
-<link rel="prefetch" href="/assets/Calendar-BnmQ7rKz.js"  as="script" crossorigin data-preloader="%2Fcalendar">
-```
+## 配置选项
 
-浏览器会在空闲时自动拉取这些文件到 HTTP 缓存，用户点击路由时直接从缓存加载，无需等待。
+| 选项 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `routes` | `(string \| PreloadRoute)[]` | `[]` | 预加载路由列表；字符串按约定推断组件 |
+| `delay` | `number` | `2000` | 页面加载完成后延迟多少毫秒触发（不打扰首屏） |
+| `debug` | `boolean` | dev `true` / prod `false` | 调试日志与 `window.__preloaderDebug` 调试工具 |
+| `showStatus` | `boolean` | `true` | 页面角落显示预加载状态提示 |
+| `statusPosition` | `'bottom-right' \| 'bottom-left' \| 'top-right' \| 'top-left'` | `'bottom-right'` | 状态提示位置 |
+| `exclude` | `string[]` | `[]` | 排除的路由（精确或前缀匹配） |
 
-## ⚙️ 完整配置项
+**`PreloadRoute` 对象格式**：
 
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `routes` | `(string \| PreloadRoute)[]` | `[]` | 要预加载的路由列表 |
-| `delay` | `number` | `2000` | 状态 UI 延迟显示时间 (ms) |
-| `showStatus` | `boolean` | `true` | 是否显示右下角进度提示 |
-| `statusPosition` | `StatusPosition` | `'bottom-right'` | 进度提示位置 |
-| `debug` | `boolean` | 开发环境 `true` | 开启控制台调试信息 |
-| `exclude` | `string[]` | `[]` | 排除的路由路径（精确或前缀匹配） |
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `path` | `string` | 路由路径，如 `/dashboard` |
+| `component` | `string` | 可选。组件文件路径，不填自动推断为 `@/views/{path}/index.vue` |
+| `reason` | `string` | 可选。备注，仅用于日志显示 |
+| `priority` | `number` | 可选。数字越小越优先加载，默认 `2` |
 
-### `PreloadRoute` 对象格式
+## 工作原理
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `path` | `string` | ✅ | 路由路径，含 `:param` 的动态路由会被自动过滤 |
-| `component` | `string` | ❌ | 组件路径，不填自动推断为 `@/views/{path}/index.vue` |
-| `reason` | `string` | ❌ | 备注说明，仅用于调试日志 |
-| `priority` | `number` | ❌ | 优先级，数字越小 `<link>` 越靠前，默认 `2` |
+1. **`configResolved`**：读取 alias / root / command，解析路由到组件文件；动态路由（`:param`）与 `exclude` 命中的路由被过滤
+2. **开发模式**：`transformIndexHtml` 注入 `<link rel="modulepreload">`
+3. **生产构建**：`generateBundle` 扫描 Rollup 产物，把组件匹配到真实 chunk 文件（含 hash 的最终路径），`transformIndexHtml` 注入 `<link rel="prefetch">`——不依赖猜路径，`manualChunks` 拆分也能正确匹配
+4. **状态提示**：可选注入轻量运行时脚本（无任何依赖），页面加载完成 `delay` 毫秒后显示预加载进度角标，全部完成后自动消失
+5. **SSR**：`apply` 钩子识别 SSR 构建，不注入客户端脚本
 
-### `StatusPosition` 可选值
+## FAQ
 
-`'bottom-right'` | `'bottom-left'` | `'top-right'` | `'top-left'`
+<details>
+<summary><b>modulepreload 和 prefetch 有什么区别？</b></summary>
 
-## 💡 真实使用场景
+`modulepreload` 会立即下载**并解析编译**模块（dev 下让切换零等待）；`prefetch` 只在浏览器空闲时下载到缓存、优先级最低（生产下不影响首屏带宽）。插件按环境自动选择正确策略。
 
-```js
-preloader({
-  routes: [
-    '/demo/13-calendar',          // 📅 日历组件（fullcalendar）
-    '/demo/29-antv-x6-editor',    // 🎨 流程图编辑器
-    '/demo/16-text-editor',       // 📝 富文本编辑器
-    '/demo/33-v-table-gantt',     // 📊 甘特图组件
-    '/demo/20-dragable',          // 🔄 拖拽组件
-  ],
-  exclude: ['/login', '/404'],
-  delay: 2000,
-  debug: false   // 生产关掉
-})
-```
+</details>
 
-## 🛠️ 调试工具
+<details>
+<summary><b>组件路径和 chunk 对不上怎么办？</b></summary>
 
-**开发环境 `debug: true` 时**，控制台自动输出：
+生产构建走 `generateBundle` 产物扫描，按组件真实产物路径匹配（含 hash、`manualChunks` 拆分场景）。如果某路由始终没匹配到 chunk，开启 `debug` 查看解析日志确认 `component` 路径是否正确。
 
-```
-🚀 vite-plugin-preloader v2
-已注入 3 个 <link rel="prefetch"> 标签（浏览器原生调度）
-✅ /dashboard → /assets/Dashboard-Cx8Kfm3D.js | 主页面，必须快
-✅ /charts    → /assets/Charts-DmjPl9Rb.js    | echarts 太重了
-⚠️  /news/detail/:id (含动态参数，已自动过滤)
-```
+</details>
 
-控制台可用：
+<details>
+<summary><b>会拖慢首屏吗？</b></summary>
 
-```js
-window.__preloaderDebug.routes          // 查看所有预加载路由及 chunk 路径
-window.__preloaderDebug.check('/charts') // 检查某路由是否已成功映射 chunk
-```
+不会。`prefetch` 使用浏览器空闲时机与最低优先级；dev 的 modulepreload 也只针对你明确列出的少量路由。
 
-## 🔍 工作原理
+</details>
 
-```
-构建时（generateBundle hook）：
-  1. 扫描 Rollup/Rolldown bundle → 找到每个组件的输出 chunk 文件名（含 hash）
-  2. 匹配用户配置的路由 → 建立 component 路径 ↔ chunk 文件名 映射
+<details>
+<summary><b>SSR 项目能用吗？</b></summary>
 
-HTML 处理时（transformIndexHtml hook）：
-  3. 向 </body> 前注入 <link rel="prefetch" href="/assets/Xxx-hash.js">
-  4. 可选：注入状态 UI 脚本（网络感知 + prefetch 事件监听）
+客户端构建正常注入；SSR 构建（`isSsrBuild`）自动跳过，不会污染服务端产物。
 
-运行时（浏览器）：
-  5. 浏览器解析到 link 标签 → 在空闲时以低优先级 fetch chunk
-  6. 用户点击路由 → Vue Router 触发 import() → 命中浏览器缓存 → 瞬间加载
-```
+</details>
 
-## 🚨 注意事项
+## 兼容性
 
-**什么页面适合预加载？**
-- ✅ 用户高频访问的核心页面
-- ✅ 包含大型组件库（echarts / monaco-editor / fullcalendar）的页面
-- ✅ 首屏之后的核心流程页
+| 项目 | 要求 |
+|------|------|
+| Vite | `^5.0.0 \|\| ^6.0.0 \|\| ^7.0.0 \|\| ^8.0.0`（peer dependency） |
+| Node.js | `>= 18` |
+| 模块格式 | 随 Vite 项目，TypeScript 类型内置 |
 
-**不建议预加载：**
-- ❌ 很少访问的管理页面（浪费带宽）
-- ❌ 需要权限验证的敏感页面（用 `exclude` 排除）
-- ❌ 含 `:param` 的动态详情页（插件会自动过滤）
+## 版本历史
 
-## 📋 CHANGELOG
+见 [GitHub Releases](https://github.com/ChenyCHENYU/vite-plugin-preloader/releases) 与 [提交记录](https://github.com/ChenyCHENYU/vite-plugin-preloader/commits/main)。
 
-### v2.0.0（当前）
-- **[破坏性修复]** 生产环境预加载机制彻底重写：从无效的运行时 `import()` 改为构建时注入 `<link rel="prefetch">`（真实 chunk hash 路径）
-- **[修复]** `configResolved(config)` 正确读取 `@` 别名和项目根目录
-- **[修复]** `routes` 防 `undefined`/非数组崩溃
-- **[修复]** HTML 注入位置从 `</head>` 改为 `</body>` 前
-- **[修复]** 动态路由参数（`:id` 等）自动过滤，不再生成无效 chunk 路径
-- **[新增]** `exclude` 选项，排除不需要预加载的路由
-- **[新增]** `showStatus` / `statusPosition` 完整实现（之前仅文档声明未实现）
-- **[新增]** 网络感知：省流模式 / 2G 网络下自动跳过状态 UI
-- **[新增]** SSR 构建自动跳过（`isSsrBuild` 检测）
-- **[升级]** peerDependencies 支持 Vite 8，移除无用的 `vue` peerDep
-- **[升级]** TypeScript 类型定义与实现完全对齐
+## 贡献
 
-### v1.1.x（历史）
-- 早期版本，使用运行时动态 `import()` 预加载方式，开创了按优先级精细化路由预加载的配置模式
+欢迎提交 [Issue](https://github.com/ChenyCHENYU/vite-plugin-preloader/issues) 与 Pull Request。
 
+## 许可证
+
+[MIT](./LICENSE) © 2025-present CHENY
+
+## 作者
+
+**CHENY** · [GitHub @ChenyCHENYU](https://github.com/ChenyCHENYU)
+
+---
+
+<div align="center">
+  <sub>如果这个插件对你有帮助，欢迎点一个 ⭐ 让更多人看到。</sub>
+</div>
