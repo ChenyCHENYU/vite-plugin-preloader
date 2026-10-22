@@ -65,6 +65,12 @@ export default function preloaderPlugin(
             '   开发模式：注入 <link rel="modulepreload">，生产构建由运行时脚本在 load 后注入 <link rel="prefetch">',
           );
         }
+        // 浏览器 prefetch 缓存总量有限（Chrome 约数十条且按 LRU 逐出），路由过多会互相挤掉
+        if (resolvedRoutes.length > 12) {
+          console.warn(
+            `   ⚠️  预加载路由达 ${resolvedRoutes.length} 个：prefetch 缓存有限，建议精简到 12 个以内（保留高频入口），或改用 strategy: 'viewport' 按需预取`,
+          );
+        }
       }
     },
 

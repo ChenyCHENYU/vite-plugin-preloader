@@ -20,6 +20,38 @@ function makeConfig(over: Partial<RuntimeConfig> = {}): RuntimeConfig {
   }
 }
 
+describe('v2.3 增强（CSS 关联 / 命中率观测）', () => {
+  it('build 注入器为路由的 JS 与 CSS 分别创建 as=script / as=style link', () => {
+    const script = buildRuntimeScript(
+      makeConfig({
+        isBuild: true,
+        routes: [{ path: '/c', chunkPath: '/assets/c.js', css: ['/assets/c.css'], reason: '' }],
+      }),
+    )
+    expect(script).toContain("i?'style':'script'")
+    expect(script).toContain('makeRouteLinks')
+    // 路由数据携带 css 数组
+    expect(script).toContain('"/assets/c.css"')
+  })
+
+  it('debug 时注入命中率观测（click 统计 + stats()），非 debug 零开销', () => {
+    const withDebug = buildRuntimeScript(
+      makeConfig({ isBuild: true, debug: true, routes: [{ path: '/a', chunkPath: '/assets/a.js', reason: '' }] }),
+    )
+    expect(withDebug).toContain('__preloaderDebug')
+    expect(withDebug).toContain('stats:function')
+    expect(withDebug).toContain("addEventListener('click'")
+
+    const noDebug = buildRuntimeScript(
+      makeConfig({ isBuild: true, routes: [{ path: '/a', chunkPath: '/assets/a.js', reason: '' }] }),
+    )
+    expect(noDebug).not.toContain("addEventListener('click'")
+    expect(noDebug).not.toContain('stats:function')
+    // markDone 仍存在（空函数），保证 oneLink 调用安全
+    expect(noDebug).toContain('function markDone(){}')
+  })
+})
+
 describe('buildRuntimeScript', () => {
   it('无路由 → 零注入（dev 与 build 一致）', () => {
     expect(buildRuntimeScript(makeConfig({ routes: [] }))).toBe('')

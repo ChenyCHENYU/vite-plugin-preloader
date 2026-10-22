@@ -72,6 +72,10 @@ export interface ResolvedRoute {
   component: string;
   /** 生产构建时填充，为实际输出的 chunk 文件相对 URL，如 /assets/Dashboard-Cx8K.js */
   chunkPath?: string;
+  /** 生产构建时填充，该路由组件引入的 CSS 产物 URL（cssCodeSplit 拆分场景） */
+  cssPaths?: string[];
+  /** 生产构建时填充，chunk 代码体积（字节），同 priority 时小者先预取 */
+  bytes?: number;
   reason: string;
   priority: number;
 }

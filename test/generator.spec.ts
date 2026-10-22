@@ -18,6 +18,7 @@ const baseOptions = {
   showStatus: false,
   statusPosition: 'bottom-right' as const,
   exclude: [],
+  strategy: 'all' as const,
 }
 
 function makeGenerator(overrides: Partial<PreloaderOptions> = {}): CodeGenerator {
@@ -136,6 +137,66 @@ describe('fillChunkPaths', () => {
     fs.rmSync(linkedRoot, { force: true })
   })
 
+  it('智能匹配：不写 component 时按目录/扩展名约定候选命中', () => {
+    const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vpp-smart-'))
+    fs.mkdirSync(path.join(realRoot, 'src', 'views'), { recursive: true })
+    // 实际文件是 views/dashboard.vue，而默认推断是 views/dashboard/index.vue
+    const componentFile = path.join(realRoot, 'src', 'views', 'dashboard.vue')
+    fs.writeFileSync(componentFile, 'export default 1')
+
+    const g = makeGenerator()
+    g.setViteConfig(
+      mockConfig({ root: realRoot, resolve: { alias: [{ find: '@', replacement: path.join(realRoot, 'src') }] } }),
+    )
+    // component 缺省 → resolveRoutes 推断 index.vue → 候选降级命中 dashboard.vue
+    const filled = g.fillChunkPaths(
+      [{ path: '/dashboard', component: '@/views/dashboard/index.vue', reason: '', priority: 2 }],
+      { 'assets/dash-hash.js': { type: 'chunk', facadeModuleId: componentFile } } as never,
+    )
+    expect(filled[0].chunkPath).toBe('/assets/dash-hash.js')
+    fs.rmSync(realRoot, { recursive: true, force: true })
+  })
+
+  it('智能匹配：结构化兜底命中任意目录下的 /views/{path}/index.*', () => {
+    const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vpp-fallback-'))
+    fs.mkdirSync(path.join(realRoot, 'src', 'nested', 'views', 'z'), { recursive: true })
+    const componentFile = path.join(realRoot, 'src', 'nested', 'views', 'z', 'index.vue')
+    fs.writeFileSync(componentFile, 'export default 1')
+
+    const g = makeGenerator()
+    g.setViteConfig(
+      mockConfig({ root: realRoot, resolve: { alias: [{ find: '@', replacement: path.join(realRoot, 'src') }] } }),
+    )
+    const filled = g.fillChunkPaths(
+      [{ path: '/z', component: '@/views/z/index.vue', reason: '', priority: 2 }],
+      { 'assets/z-hash.js': { type: 'chunk', facadeModuleId: componentFile } } as never,
+    )
+    expect(filled[0].chunkPath).toBe('/assets/z-hash.js')
+    fs.rmSync(realRoot, { recursive: true, force: true })
+  })
+
+  it('eager 剔除：路由 chunk 已被入口静态依赖时不预取', () => {
+    const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vpp-eager-'))
+    fs.mkdirSync(path.join(realRoot, 'src', 'views'), { recursive: true })
+    const componentFile = path.join(realRoot, 'src', 'views', 'shared.js')
+    fs.writeFileSync(componentFile, 'export default 1')
+
+    const g = makeGenerator()
+    g.setViteConfig(
+      mockConfig({ root: realRoot, resolve: { alias: [{ find: '@', replacement: path.join(realRoot, 'src') }] } }),
+    )
+    const filled = g.fillChunkPaths(
+      [{ path: '/shared', component: '@/views/shared.js', reason: '', priority: 2 }],
+      {
+        'assets/entry-hash.js': { type: 'chunk', isEntry: true, imports: ['assets/shared-hash.js'] },
+        'assets/shared-hash.js': { type: 'chunk', facadeModuleId: componentFile },
+      } as never,
+    )
+    // 命中 chunk 但被入口静态依赖 → 不携带 chunkPath
+    expect(filled[0].chunkPath).toBeUndefined()
+    fs.rmSync(realRoot, { recursive: true, force: true })
+  })
+
   it('无 base 时生成根路径', () => {
     const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vpp-real2-'))
     fs.mkdirSync(path.join(realRoot, 'src', 'views'), { recursive: true })
@@ -151,6 +212,66 @@ describe('fillChunkPaths', () => {
       { 'assets/b-hash.js': { type: 'chunk', facadeModuleId: componentFile } } as never,
     )
     expect(filled[0].chunkPath).toBe('/assets/b-hash.js')
+    fs.rmSync(realRoot, { recursive: true, force: true })
+  })
+
+  it('CSS 关联：组件引入的样式产物随路由一起填充 cssPaths（含 base）', () => {
+    const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vpp-css-'))
+    fs.mkdirSync(path.join(realRoot, 'src', 'views', 'c'), { recursive: true })
+    const componentFile = path.join(realRoot, 'src', 'views', 'c', 'index.js')
+    fs.writeFileSync(componentFile, "import './style.css'")
+
+    const g = makeGenerator()
+    g.setViteConfig(
+      mockConfig({
+        root: realRoot,
+        base: '/app/',
+        resolve: { alias: [{ find: '@', replacement: path.join(realRoot, 'src') }] },
+      }),
+    )
+    const filled = g.fillChunkPaths(
+      [{ path: '/c', component: '@/views/c/index.js', reason: '', priority: 2 }],
+      {
+        'assets/c-hash.js': { type: 'chunk', facadeModuleId: componentFile },
+        'assets/c-style.css': {
+          type: 'asset',
+          originalFileNames: ['src/views/c/index.js'],
+        },
+      } as never,
+    )
+    expect(filled[0].chunkPath).toBe('/app/assets/c-hash.js')
+    expect(filled[0].cssPaths).toEqual(['/app/assets/c-style.css'])
+    fs.rmSync(realRoot, { recursive: true, force: true })
+  })
+
+  it('体积感知排序：同 priority 时小 chunk 在前，priority 仍最优先', () => {
+    const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vpp-sort-'))
+    fs.mkdirSync(path.join(realRoot, 'src', 'views'), { recursive: true })
+    const small = path.join(realRoot, 'src', 'views', 'small.js')
+    const big = path.join(realRoot, 'src', 'views', 'big.js')
+    const lowP = path.join(realRoot, 'src', 'views', 'lowp.js')
+    fs.writeFileSync(small, '1')
+    fs.writeFileSync(big, '1')
+    fs.writeFileSync(lowP, '1')
+
+    const g = makeGenerator()
+    g.setViteConfig(
+      mockConfig({ root: realRoot, resolve: { alias: [{ find: '@', replacement: path.join(realRoot, 'src') }] } }),
+    )
+    const filled = g.fillChunkPaths(
+      [
+        { path: '/big', component: '@/views/big.js', reason: '', priority: 2 },
+        { path: '/small', component: '@/views/small.js', reason: '', priority: 2 },
+        { path: '/lowp', component: '@/views/lowp.js', reason: '', priority: 1 },
+      ],
+      {
+        'assets/big-hash.js': { type: 'chunk', facadeModuleId: big, codeLength: 9000 },
+        'assets/small-hash.js': { type: 'chunk', facadeModuleId: small, codeLength: 100 },
+        'assets/lowp-hash.js': { type: 'chunk', facadeModuleId: lowP, codeLength: 99999 },
+      } as never,
+    )
+    // priority 1 最先；同 priority=2 中 small(100B) 先于 big(9000B)
+    expect(filled.map((r) => r.path)).toEqual(['/lowp', '/small', '/big'])
     fs.rmSync(realRoot, { recursive: true, force: true })
   })
 })

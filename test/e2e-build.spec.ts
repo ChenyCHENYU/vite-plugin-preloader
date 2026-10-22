@@ -25,10 +25,16 @@ beforeAll(() => {
   outDir = path.join(root, 'dist')
   fs.mkdirSync(path.join(root, 'src/views/a'), { recursive: true })
   fs.mkdirSync(path.join(root, 'src/views/b'), { recursive: true })
+  fs.mkdirSync(path.join(root, 'src/views/c'), { recursive: true })
   fs.writeFileSync(path.join(root, 'index.html'), '<!doctype html><html><head></head><body><script type="module" src="/src/main.js"></script></body></html>')
   fs.writeFileSync(path.join(root, 'src/views/a/index.js'), 'export default "A"')
   fs.writeFileSync(path.join(root, 'src/views/b/index.js'), 'export default "B"')
-  fs.writeFileSync(path.join(root, 'src/main.js'), "import('./views/a/index.js')\nimport('./views/b/index.js')\n")
+  fs.writeFileSync(path.join(root, 'src/views/c/style.css'), '.c{color:red}')
+  fs.writeFileSync(path.join(root, 'src/views/c/index.js'), "import './style.css'\nexport default \"C\"")
+  fs.writeFileSync(
+    path.join(root, 'src/main.js'),
+    "import('./views/a/index.js')\nimport('./views/b/index.js')\nimport('./views/c/index.js')\n",
+  )
 })
 
 afterAll(() => {
@@ -37,7 +43,7 @@ afterAll(() => {
 
 describe('vite build e2e', () => {
   it(
-    '生产 HTML 注入运行时 prefetch 数据（base + hash + 动态路由过滤）',
+    '生产 HTML 注入运行时 prefetch 数据（智能匹配 + base + hash + 动态路由过滤）',
     async () => {
       await build({
         root,
@@ -47,9 +53,12 @@ describe('vite build e2e', () => {
         resolve: { alias: [{ find: '@', replacement: path.join(root, 'src') }] },
         plugins: [
           preloader({
+            // 不传 component：默认推断 index.vue 会 miss，
+            // 智能候选（views/a/index.js）应自动命中真实 chunk
             routes: [
-              { path: '/a', component: '@/views/a/index.js' },
-              { path: '/b/:id', component: '@/views/b/index.js' }, // 动态路由应被过滤
+              { path: '/a' },
+              { path: '/b/:id' }, // 动态路由应被过滤
+              { path: '/c' }, // 带 CSS 的路由：样式产物应随路由一起预取
             ],
             debug: false,
             showStatus: false,
@@ -64,15 +73,19 @@ describe('vite build e2e', () => {
 
       // 运行时脚本注入成功（v2.0.x 顺序 bug 会在这里全部缺失）
       expect(html).toContain('vite-plugin-preloader v2 - prefetch injector')
-      // chunkPath 携带 base 与真实 hash 文件名
+      // 智能匹配命中：chunkPath 携带 base 与真实 hash 文件名
       expect(aChunk).toBeTruthy()
       expect(html).toContain(`/app/assets/${aChunk}`)
       // 静态 HTML 不含 prefetch link（由运行时 load+delay 后创建）
       expect(html).not.toMatch(/<link rel="prefetch"/)
       // :param 路由被过滤，b 的 chunk 不出现在数据里
       const bChunk = assets.find((f) => /^b-.*\.js$/.test(f))
-      expect(html).not.toContain(`"/b/:id"`)
+      expect(html).not.toContain('"/b/:id"')
       expect(bChunk ? html.includes(`/app/assets/${bChunk}`) : false).toBe(false)
+      // c 路由的 CSS 产物进入预取数据（cssCodeSplit 拆分场景）
+      const cCss = assets.find((f) => /^c-.*\.css$/.test(f))
+      expect(cCss).toBeTruthy()
+      expect(html).toContain(`/app/assets/${cCss}`)
     },
     120_000,
   )

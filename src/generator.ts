@@ -22,6 +22,10 @@ export interface BundleItem {
   /** 静态 import 的 chunk 文件名（动态 import 不在其中） */
   imports?: readonly string[]
   isEntry?: boolean
+  /** chunk 代码体积（字节），用于同 priority 时的体积感知排序 */
+  codeLength?: number
+  /** CSS asset 的来源模块（root 相对路径），rolldown/rollup 均提供 */
+  originalFileNames?: readonly string[]
   source?: string | Uint8Array
 }
 export type OutputBundleCompat = Record<string, BundleItem>
@@ -142,34 +146,67 @@ export class CodeGenerator {
    * 视为无预加载价值，返回时不携带 chunkPath
    */
   fillChunkPaths(routes: ResolvedRoute[], bundle: OutputBundleCompat): ResolvedRoute[] {
-    // realpath 归一后的绝对路径 → chunk 文件名
-    const chunkByAbs = new Map<string, string>()
-    for (const [fileName, chunkOrAsset] of Object.entries(bundle)) {
-      if (chunkOrAsset.type !== 'chunk') continue
-      if (!chunkOrAsset.facadeModuleId) continue
-      chunkByAbs.set(this.toRealPath(chunkOrAsset.facadeModuleId), fileName)
+    // realpath 归一后的绝对路径 → chunk 文件名/体积
+    const chunkByAbs = new Map<string, { fileName: string; bytes: number }>()
+    // 模块绝对路径 → 该模块引入的 CSS 产物文件名（cssCodeSplit 拆分场景）
+    const cssByAbs = new Map<string, string[]>()
+    for (const [fileName, item] of Object.entries(bundle)) {
+      if (item.type === 'chunk') {
+        if (!item.facadeModuleId) continue
+        chunkByAbs.set(this.toRealPath(item.facadeModuleId), { fileName, bytes: item.codeLength ?? 0 })
+      } else if (fileName.endsWith('.css')) {
+        for (const ofn of item.originalFileNames ?? []) {
+          const abs = this.toRealPath(path.join(this.viteRoot, ofn))
+          const list = cssByAbs.get(abs) ?? []
+          list.push(fileName)
+          cssByAbs.set(abs, list)
+        }
+      }
     }
 
     const eager = collectEagerChunkNames(bundle)
 
-    return routes.map((route) => {
+    const matched = routes.map((route) => {
       for (const candidate of this.candidateComponents(route)) {
-        const fileName = chunkByAbs.get(this.toRealPath(this.resolveComponentAbsPath(candidate)))
-        if (!fileName || eager.has(fileName)) continue
-        return { ...route, chunkPath: this.viteBase + fileName }
+        const hitAbs = this.toRealPath(this.resolveComponentAbsPath(candidate))
+        const hit = chunkByAbs.get(hitAbs)
+        if (!hit || eager.has(hit.fileName)) continue
+        return this.withPaths(route, hit, cssByAbs, hitAbs)
       }
       // 结构化兜底：按 /{views|pages}/{path}(/index)?.* 结尾精确匹配模块路径段
       const cleanPath = route.path.replace(/^\//, '').replace(/\/$/, '')
       if (cleanPath) {
         const suffixRe = new RegExp(`/(?:views|pages)/${escapeRegExp(cleanPath)}(?:/index)?\\.[a-z]+$`)
-        for (const [abs, fileName] of chunkByAbs) {
+        for (const [abs, hit] of chunkByAbs) {
           if (!suffixRe.test(abs)) continue
-          if (eager.has(fileName)) continue
-          return { ...route, chunkPath: this.viteBase + fileName }
+          if (eager.has(hit.fileName)) continue
+          return this.withPaths(route, hit, cssByAbs, abs)
         }
       }
       return route
     })
+
+    // 同 priority 时小 chunk 优先：更小的先进入缓存，提高整体命中率
+    return matched
+      .map((r, i) => ({ r, i }))
+      .sort((a, b) => a.r.priority - b.r.priority || (a.r.bytes ?? 0) - (b.r.bytes ?? 0) || a.i - b.i)
+      .map(({ r }) => r)
+  }
+
+  /** 组装命中结果：chunk URL + 关联 CSS 产物 URL（按命中模块收集） */
+  private withPaths(
+    route: ResolvedRoute,
+    hit: { fileName: string; bytes: number },
+    cssByAbs: Map<string, string[]>,
+    hitAbs: string,
+  ): ResolvedRoute {
+    const css = [...new Set(cssByAbs.get(hitAbs) ?? [])]
+    return {
+      ...route,
+      chunkPath: this.viteBase + hit.fileName,
+      cssPaths: css.length ? css.map((f) => this.viteBase + f) : undefined,
+      bytes: hit.bytes,
+    }
   }
 
   /**
@@ -200,6 +237,7 @@ export class CodeGenerator {
       routes: routes.map((r) => ({
         path: r.path,
         chunkPath: r.chunkPath ?? null,
+        css: r.cssPaths && r.cssPaths.length ? r.cssPaths : undefined,
         reason: r.reason,
       })),
     })

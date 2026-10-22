@@ -1,14 +1,14 @@
 // ============================================================================
 // ⚡ src/runtime.ts - 运行时脚本生成
-// v2.2 核心改动：
-//   1. strategy='all'：按 priority 分批注入（每批 4 个、批次 8s 兜底放行），
-//      弱网不挤占连接，priority 真正决定预取顺序
-//   2. strategy='viewport'：只预取视口内 / 即将点击的 <a href> 对应路由
-//      （IntersectionObserver + pointerover 事件委托，动态渲染链接天然覆盖）
-//   3. 无路由时零注入（build 也省掉注入器）
-//   4. 内嵌 JSON 转义 '<'，防 </script> 逃逸；statusPosition 类型收紧
-// 开发模式：<link rel="modulepreload"> 由 transformIndexHtml 静态注入，
-// 本脚本仅负责状态角标与调试工具，不受 strategy 影响
+// v2.3 核心改动：
+//   1. 路由关联 CSS 预取：JS chunk 与其 CSS 产物成组预取（as=style），
+//      点击切换时不再现拉样式
+//   2. debug 命中率观测：__preloaderDebug.stats() 返回预取完成数与
+//      点击命中/未命中计数（仅 debug 时注入，零生产开销）
+//   3. 预取粒度=路由：每路由的 JS+CSS 全部落定才计入下一批/进度
+// v2.2：strategy='all' 按 priority 分批（每批 4 个、8s 兜底放行）；
+//       strategy='viewport' 视口/悬停预取（IO + pointerover 委托）
+// v2.1：生产 prefetch 由本脚本在 load + delay 后注入，省流/2G 跳过
 // ============================================================================
 import type { StatusPosition, PreloadStrategy } from './types'
 
@@ -19,7 +19,7 @@ export interface RuntimeConfig {
   statusPosition: StatusPosition
   strategy: PreloadStrategy
   isBuild: boolean
-  routes: Array<{ path: string; chunkPath: string | null; reason: string }>
+  routes: Array<{ path: string; chunkPath: string | null; css?: string[]; reason: string }>
 }
 
 const STATUS_STYLES: Record<StatusPosition, string> = {
@@ -87,6 +87,31 @@ export function buildRuntimeScript(config: RuntimeConfig): string {
   }`
     : ''
 
+  // 命中率观测（debug-only）：点击链接时统计目标路由 chunk 是否已预取完成
+  // 非 debug 时保留空 markDone，oneLink 统一调用（避免引用未定义变量）
+  const statsCode = config.debug
+    ? `
+  var doneUrls={},hits=0,misses=0;
+  function markDone(u,ok){if(ok)doneUrls[u]=1;}
+  function normD(p){return('/'+String(p).replace(/^\\/+/,'').replace(/\\/+$/,'').replace(/\\/{2,}/g,'/'))}
+  function routeOf(p){
+    for(var i=0;i<C.routes.length;i++)if(normD(C.routes[i].path)===normD(p))return C.routes[i];
+    return null;
+  }
+  document.addEventListener('click',function(ev){
+    var t=ev.target,a=t&&t.closest?t.closest('a[href]'):null;
+    if(!a)return;
+    try{
+      var u=new URL(a.getAttribute('href'),location.href);
+      if(u.origin!==location.origin)return;
+      var r=routeOf(u.pathname);
+      if(!r||!r.chunkPath)return;
+      if(doneUrls[r.chunkPath])hits++;else misses++;
+    }catch(_){}
+  },true);`
+    : `
+  function markDone(){}`
+
   const debugCode = config.debug
     ? `
   function logInjected(n){
@@ -94,32 +119,44 @@ export function buildRuntimeScript(config: RuntimeConfig): string {
     console.log((C.isBuild?'页面 load 后 '+C.delay+'ms ':'已 ')+C.strategy+' 模式注入 '+n+' 个 <link rel=\"'+(C.isBuild?'prefetch':'modulepreload')+'\">');
     C.routes.forEach(function(r){
       var ok=r.chunkPath;
-      console.log((ok?'✅ ':'⚠️  ')+r.path+(ok?' → '+r.chunkPath:' (chunk 未匹配，仅开发环境有效)')+(r.reason?' | '+r.reason:''));
+      console.log((ok?'✅ ':'⚠️  ')+r.path+(ok?' → '+r.chunkPath+(r.css&&r.css.length?'（+'+r.css.length+' CSS）':''):' (chunk 未匹配，仅开发环境有效)')+(r.reason?' | '+r.reason:''));
     });
     console.groupEnd();
     window.__preloaderDebug={
       routes:C.routes,
       check:function(p){return C.routes.some(function(r){return r.path===p&&!!r.chunkPath;})},
-      help:function(){console.log('__preloaderDebug: .routes | .check(path)');}
+      stats:function(){return {prefetched:Object.keys(doneUrls).length,hits:hits,misses:misses}},
+      help:function(){console.log('__preloaderDebug: .routes | .check(path) | .stats()');}
     };
     console.log('%c🛠 调试: window.__preloaderDebug','color:#94a3b8;font-size:11px');
   }`
     : ''
 
-  // ---- 生产注入器（按 strategy 裁剪）与 dev 初始化 ----
   const initCode = config.isBuild
     ? buildInitCode(config)
     : devInitCode({ statusUiCode, debugCode })
-  // makeLink 仅生产需要（dev 的 link 已静态存在）
-  const makeLinkCode = config.isBuild
+
+  // 预取工厂仅生产需要（dev 的 link 已静态存在）
+  const factoryCode = config.isBuild
     ? `
-  function makeLink(href,attr,onSettled){
+  function oneLink(href,as,cross,onSettled){
     var l=document.createElement('link');
-    l.rel='prefetch';l.as='script';l.crossOrigin='';
-    l.setAttribute('data-preloader',attr);
+    l.rel='prefetch';l.as=as;
+    if(cross)l.crossOrigin='';
     l.href=href;
-    if(onSettled){l.addEventListener('load',onSettled);l.addEventListener('error',onSettled);}
+    if(onSettled){l.addEventListener('load',function(){markDone(href,true);onSettled();});l.addEventListener('error',function(){markDone(href,false);onSettled();});}
     return l;
+  }
+  // 一个路由 = JS chunk + 关联 CSS，全部落定才回调 onRoute（驱动批次与进度）
+  function makeRouteLinks(r,onRoute){
+    var hrefs=[r.chunkPath].concat(r.css||[]);
+    var pending=hrefs.length,ls=[];
+    function dec(){if(!--pending&&onRoute)onRoute();}
+    hrefs.forEach(function(h,i){
+      var l=oneLink(h,i?'style':'script',!i,dec);
+      ls.push(l);links.push(l);
+    });
+    return ls;
   }`
     : ''
 
@@ -130,7 +167,8 @@ export function buildRuntimeScript(config: RuntimeConfig): string {
   var slow=!!(conn&&(conn.saveData||['slow-2g','2g'].indexOf(conn.effectiveType)>=0));
   var Q=[];C.routes.forEach(function(r){if(r.chunkPath)Q.push(r)});
   var links=[];
-  ${makeLinkCode}
+  ${factoryCode}
+  ${statsCode}
   ${debugCode}
   ${statusUiCode}
 ${initCode}
@@ -142,7 +180,7 @@ ${initCode}
 
 /** 生产 'all'：分批注入；生产 'viewport'：视口/悬停预取 */
 function buildInitCode(config: RuntimeConfig): string {
-  const tickRef = config.showStatus ? 'tick' : 'null'
+  const onRouteRef = config.showStatus ? 'tick' : 'null'
   const statusOpen = config.showStatus ? 'showStatusUI(links,Q.length);' : ''
   const logOpen = config.debug ? 'logInjected(Q.length);' : ''
 
@@ -155,8 +193,10 @@ function buildInitCode(config: RuntimeConfig): string {
     var r=idx[norm(pathname)];
     if(!r||seen[r.chunkPath])return;
     seen[r.chunkPath]=1;
-    var l=makeLink(r.chunkPath,encodeURIComponent(r.path),${tickRef});
-    links.push(l);document.head.appendChild(l);
+    var ls=makeRouteLinks(r,${onRouteRef});
+    var frag=document.createDocumentFragment();
+    ls.forEach(function(l){frag.appendChild(l)});
+    document.head.appendChild(frag);
   }
   function urlOf(a){
     try{return new URL(a.getAttribute('href'),location.href)}catch(_){return null}
@@ -191,7 +231,7 @@ function buildInitCode(config: RuntimeConfig): string {
   }`
   }
 
-  // strategy 'all'：分批注入（每批 BATCH 个，全 settling 或超时后放行下一批）
+  // strategy 'all'：按路由分批（每批 BATCH 个，全部落定或超时后放行下一批）
   return `
   var BATCH=4,cur=0;
   function injectBatch(){
@@ -205,8 +245,10 @@ function buildInitCode(config: RuntimeConfig): string {
         if(settled)return;settled=true;
         if(!--pending){clearTimeout(timer);injectBatch();}
       };
-      var l=makeLink(r.chunkPath,encodeURIComponent(r.path),function(){${tickRef}&&${tickRef}();r._s();});
-      links.push(l);document.head.appendChild(l);
+      var ls=makeRouteLinks(r,r._s);
+      var frag=document.createDocumentFragment();
+      ls.forEach(function(l){frag.appendChild(l)});
+      document.head.appendChild(frag);
     });
   }
   function init(){
