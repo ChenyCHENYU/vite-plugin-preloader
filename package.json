@@ -1,19 +1,27 @@
 {
   "name": "vite-plugin-preloader",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Vite 智能路由预加载插件 - dev 注入 modulepreload，build 注入 prefetch",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
     }
   },
   "files": [
-    "dist",
+    "dist/index.js",
+    "dist/index.mjs",
+    "dist/index.d.ts",
+    "dist/index.d.mts",
     "docs",
     "README.md",
     "LICENSE"
@@ -34,7 +42,6 @@
     "prepublishOnly": "npm run build",
     "test": "vitest",
     "test:watch": "vitest --watch",
-    "lint": "eslint src --fix",
     "format": "prettier --write src/",
     "type-check": "tsc --noEmit"
   },
