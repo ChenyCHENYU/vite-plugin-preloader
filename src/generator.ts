@@ -1,38 +1,73 @@
 // ============================================================================
 // 🛠️ src/generator.ts - 代码生成器
-// v2 核心改动：
-//   1. 读取 Vite ResolvedConfig 获取真实别名和根目录
-//   2. 通过 Rollup OutputBundle 的 facadeModuleId 匹配真实 chunk 路径
-//   3. 生成 <link rel="prefetch"> / <link rel="modulepreload"> 标签（浏览器原生调度）
-//   4. 过滤动态路由参数（:param）和用户 exclude 列表
-//   5. 状态脚本由 runtime.ts 独立生成，不再用运行时 import()
+// v2.1 核心改动：
+//   1. chunkPath 拼接 config.base，支持子路径部署与绝对 URL base
+//   2. 组件绝对路径与 facadeModuleId 统一 realpath 归一，
+//      symlink 场景（macOS /tmp、pnpm workspace、monorepo）不再静默失配
+//   3. 生产 prefetch 改由运行时脚本注入，静态 <link> 注入仅保留 dev 的
+//      modulepreload；生产 HTML 由 generateBundle 直改 asset source
 // ============================================================================
 import type { ResolvedConfig } from 'vite'
 import type { PreloaderOptions, ResolvedRoute } from './types'
-
-// 使用鸭子类型兼容 rollup / rolldown（Vite 8 切换到 rolldown）
-interface BundleChunk {
-  type: string
-  facadeModuleId?: string | null
-}
-type OutputBundleCompat = Record<string, BundleChunk>
 import { buildRuntimeScript } from './runtime'
 import { normalizePath } from 'vite'
 import path from 'node:path'
+import fs from 'node:fs'
+
+/** 鸭子类型兼容 rollup / rolldown 的 bundle 条目（Vite 8 切换到 rolldown） */
+export interface BundleItem {
+  type: string
+  fileName?: string
+  facadeModuleId?: string | null
+  /** 静态 import 的 chunk 文件名（动态 import 不在其中） */
+  imports?: readonly string[]
+  isEntry?: boolean
+  source?: string | Uint8Array
+}
+export type OutputBundleCompat = Record<string, BundleItem>
+
+/**
+ * 收集所有入口 chunk 的静态依赖闭包（文件名集合）。
+ * 这些 chunk 浏览器加载页面时本就会立即拉取，对其 prefetch 是纯浪费
+ */
+function collectEagerChunkNames(bundle: OutputBundleCompat): Set<string> {
+  const eager = new Set<string>()
+  const visited = new Set<string>()
+  const visit = (fileName: string) => {
+    if (visited.has(fileName)) return
+    visited.add(fileName)
+    eager.add(fileName)
+    const chunk = bundle[fileName]
+    for (const dep of chunk?.imports ?? []) visit(dep)
+  }
+  for (const [fileName, chunk] of Object.entries(bundle)) {
+    if (chunk.type === 'chunk' && chunk.isEntry) visit(fileName)
+  }
+  return eager
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
 
 export class CodeGenerator {
   /** @ 别名对应的相对路径（相对于 viteRoot），默认 'src' */
   private srcAlias = 'src'
   private viteRoot = process.cwd()
+  /** resolvedConfig.base，归一为以 / 结尾（绝对 URL base 同样满足） */
+  private viteBase = '/'
+  private realpathCache = new Map<string, string>()
 
   constructor(private readonly options: Required<PreloaderOptions>) {}
 
   /**
-   * 从 Vite resolvedConfig 中读取项目根目录和 @ 别名
+   * 从 Vite resolvedConfig 中读取项目根目录、base 和 @ 别名
    * 必须在 configResolved hook 中调用
    */
   setViteConfig(config: ResolvedConfig): void {
     this.viteRoot = config.root
+    this.viteBase = config.base || '/'
+    if (!this.viteBase.endsWith('/')) this.viteBase += '/'
 
     // 统一处理数组/对象两种 alias 格式
     const alias = config.resolve?.alias
@@ -44,7 +79,7 @@ export class CodeGenerator {
       (a) => a.find === '@' || (a.find instanceof RegExp && a.find.source === '^@/'),
     )
     if (atEntry && typeof atEntry.replacement === 'string') {
-      const rel = normalizePath(path.relative(this.viteRoot, atEntry.replacement))
+      const rel = normalizePath(path.relative(this.viteRoot, atEntry.replacement)).replace(/\/+$/, '')
       if (rel) this.srcAlias = rel
     }
   }
@@ -95,57 +130,64 @@ export class CodeGenerator {
   }
 
   /**
-   * 根据 Rollup OutputBundle 中的 facadeModuleId 为各路由匹配实际 chunk 文件路径
-   * 仅在生产构建的 generateBundle hook 中调用
+   * 根据 Rollup/Rolldown OutputBundle 中的 facadeModuleId 为各路由匹配实际 chunk 文件路径
+   * 仅在生产构建的 generateBundle hook 中调用。
+   *
+   * 匹配策略（逐级降级，最大化"不写 component 也能命中"）：
+   *   1. 显式/推断的 component 路径
+   *   2. 目录与扩展名约定候选：views|pages × {path}/index.* × {path}.* × vue/js/ts/jsx/tsx
+   *   3. 结构化兜底：chunkMap 中以 /{views|pages}/{path}(/index)?.* 结尾的模块
+   *
+   * 命中后若该 chunk 已被任一入口 chunk 静态依赖（浏览器本就会立即加载），
+   * 视为无预加载价值，返回时不携带 chunkPath
    */
   fillChunkPaths(routes: ResolvedRoute[], bundle: OutputBundleCompat): ResolvedRoute[] {
-    // 构建 normalized-abs-path → '/assets/xxx-hash.js' 映射
-    const chunkMap = new Map<string, string>()
+    // realpath 归一后的绝对路径 → chunk 文件名
+    const chunkByAbs = new Map<string, string>()
     for (const [fileName, chunkOrAsset] of Object.entries(bundle)) {
       if (chunkOrAsset.type !== 'chunk') continue
-      const chunk = chunkOrAsset as BundleChunk
-      if (!chunk.facadeModuleId) continue
-      chunkMap.set(normalizePath(chunk.facadeModuleId), '/' + fileName)
+      if (!chunkOrAsset.facadeModuleId) continue
+      chunkByAbs.set(this.toRealPath(chunkOrAsset.facadeModuleId), fileName)
     }
 
+    const eager = collectEagerChunkNames(bundle)
+
     return routes.map((route) => {
-      const absPath = normalizePath(this.resolveComponentAbsPath(route.component))
-      const chunkPath = chunkMap.get(absPath)
-      return chunkPath ? { ...route, chunkPath } : route
+      for (const candidate of this.candidateComponents(route)) {
+        const fileName = chunkByAbs.get(this.toRealPath(this.resolveComponentAbsPath(candidate)))
+        if (!fileName || eager.has(fileName)) continue
+        return { ...route, chunkPath: this.viteBase + fileName }
+      }
+      // 结构化兜底：按 /{views|pages}/{path}(/index)?.* 结尾精确匹配模块路径段
+      const cleanPath = route.path.replace(/^\//, '').replace(/\/$/, '')
+      if (cleanPath) {
+        const suffixRe = new RegExp(`/(?:views|pages)/${escapeRegExp(cleanPath)}(?:/index)?\\.[a-z]+$`)
+        for (const [abs, fileName] of chunkByAbs) {
+          if (!suffixRe.test(abs)) continue
+          if (eager.has(fileName)) continue
+          return { ...route, chunkPath: this.viteBase + fileName }
+        }
+      }
+      return route
     })
   }
 
   /**
-   * 生成 <link> 标签字符串（注入到 </body> 前）
-   * 生产：<link rel="prefetch"> 指向实际 chunk（浏览器空闲时拉取，完全不阻塞主线程）
-   * 开发：<link rel="modulepreload"> 指向源文件（Vite dev server 处理解析）
+   * 生成 dev 模式静态注入的 <link rel="modulepreload"> 标签
+   * 生产模式的 prefetch 不做静态注入（由运行时脚本在 load + delay 后创建）
    */
-  generateLinkTags(routes: ResolvedRoute[], isBuild: boolean): string {
-    const tags: string[] = []
-
-    for (const route of routes) {
-      if (isBuild) {
-        if (!route.chunkPath) continue // 找不到 chunk 则跳过，后续会 warn
-        tags.push(
-          `<link rel="prefetch" href="${route.chunkPath}" as="script" crossorigin data-preloader="${encodeURIComponent(route.path)}">`,
-        )
-      } else {
-        // 开发模式：将 @/ 替换为 /<srcAlias>/
-        const devPath = route.component.startsWith('@/')
-          ? route.component.replace('@/', `/${this.srcAlias}/`)
-          : route.component
-        tags.push(
-          `<link rel="modulepreload" href="${devPath}" data-preloader="${encodeURIComponent(route.path)}">`,
-        )
-      }
-    }
-
-    return tags.join('\n')
+  generateLinkTags(routes: ResolvedRoute[]): string {
+    return routes
+      .map((route) => {
+        const href = this.toDevHref(route.component)
+        return `<link rel="modulepreload" href="${href}" data-preloader="${encodeURIComponent(route.path)}">`
+      })
+      .join('\n')
   }
 
   /**
-   * 生成可选的状态 UI 和调试工具脚本
-   * showStatus=false 且 debug=false 时返回空字符串（0 运行时开销）
+   * 生成运行时脚本：生产含 prefetch 注入器（必选）+ 状态角标/调试（可选）
+   * showStatus=false 且 debug=false 的 dev 模式返回空字符串（零注入）
    */
   generateRuntimeScript(routes: ResolvedRoute[], isBuild: boolean): string {
     return buildRuntimeScript({
@@ -153,6 +195,7 @@ export class CodeGenerator {
       debug: this.options.debug,
       showStatus: this.options.showStatus,
       statusPosition: this.options.statusPosition,
+      strategy: this.options.strategy,
       isBuild,
       routes: routes.map((r) => ({
         path: r.path,
@@ -160,6 +203,14 @@ export class CodeGenerator {
         reason: r.reason,
       })),
     })
+  }
+
+  /** 将片段注入到 </body> 前，无 </body> 时追加到末尾 */
+  injectIntoHtml(html: string, inject: string): string {
+    if (html.includes('</body>')) {
+      return html.replace('</body>', `${inject}\n</body>`)
+    }
+    return html + '\n' + inject
   }
 
   // --------------------------------------------------------------------------
@@ -172,6 +223,28 @@ export class CodeGenerator {
     return `@/views/${cleanPath}/index.vue`
   }
 
+  /**
+   * 生成候选组件路径：显式/推断的 component 优先，命中即返回；
+   * 未命中继续尝试目录（views/pages）× 扩展名（vue/js/ts/jsx/tsx）×
+   * 文件形态（{path}/index.* 与 {path}.*）的约定组合，
+   * 让不符合单一约定的项目结构也能零配置匹配
+   */
+  private candidateComponents(route: ResolvedRoute): string[] {
+    const cleanPath = route.path.replace(/^\//, '').replace(/\/$/, '')
+    const candidates = [route.component]
+    if (!cleanPath) {
+      // 根路由：@/views/index.* 与 @/pages/index.*
+      candidates.push('@/views/index.vue', '@/views/index.js', '@/pages/index.vue', '@/pages/index.js')
+      return candidates
+    }
+    for (const dir of ['views', 'pages']) {
+      for (const ext of ['vue', 'js', 'ts', 'jsx', 'tsx']) {
+        candidates.push(`@/${dir}/${cleanPath}/index.${ext}`, `@/${dir}/${cleanPath}.${ext}`)
+      }
+    }
+    return candidates
+  }
+
   /** 将 @/ 别名路径或相对路径解析为绝对路径，用于与 facadeModuleId 比对 */
   private resolveComponentAbsPath(componentPath: string): string {
     if (componentPath.startsWith('@/')) {
@@ -181,5 +254,35 @@ export class CodeGenerator {
       return componentPath
     }
     return path.join(this.viteRoot, componentPath)
+  }
+
+  /**
+   * realpath + normalizePath 归一：facadeModuleId 是打包器解析后的真实路径，
+   * config.root 拼出的路径可能含 symlink 前缀（macOS /tmp→/private/tmp、
+   * pnpm workspace 等），两侧统一归一后比对
+   */
+  private toRealPath(p: string): string {
+    const cached = this.realpathCache.get(p)
+    if (cached) return cached
+    let real = p
+    try {
+      real = fs.realpathSync(p)
+    } catch {
+      // 路径不存在（推断错误等）时保留原值，交给 Map 查找自然失配
+    }
+    const norm = normalizePath(real)
+    this.realpathCache.set(p, norm)
+    return norm
+  }
+
+  /** dev 模式组件路径 → dev server 可解析的 URL（始终以 / 开头，避免相对当前页面解析） */
+  private toDevHref(component: string): string {
+    if (component.startsWith('@/')) {
+      return `/${this.srcAlias}/${component.slice(2)}`
+    }
+    if (component.startsWith('/')) {
+      return component
+    }
+    return `/${component.replace(/^\.\//, '')}`
   }
 }

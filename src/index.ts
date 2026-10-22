@@ -1,33 +1,38 @@
 // ============================================================================
 // 🚀 src/index.ts - 插件入口
-// v2 核心改动：
-//   1. configResolved(config) 正确读取 alias/root/command
-//   2. generateBundle hook 扫描 Rollup bundle 匹配真实 chunk 路径
-//   3. transformIndexHtml 注入 <link rel="prefetch"> 到 </body> 前
-//   4. routes 完整防御校验，防止 undefined/非数组崩溃
-//   5. 移除无效的运行时 import() 动态加载逻辑
-//   6. 去掉无用的 vue peerDep，apply 区分 SSR 场景
+// v2.1 核心改动：
+//   1. 生产模式在 generateBundle 里直改 HTML asset source——transformIndexHtml
+//      在 build 时由 vite:build-html 调起，早于本插件的 generateBundle，
+//      永远拿不到 chunk 匹配结果（v2.0.x 因此生产一条 prefetch 都注入不了）
+//   2. transformIndexHtml 仅服务 dev：静态注入 modulepreload + 运行时脚本
+//   3. debug 默认值由 command 决定（NODE_ENV 在配置加载期不可靠）
+//   4. 移除无效的 handleHotUpdate（Vite 对 config 变更本就自动重启）
 // ============================================================================
 import type { Plugin, ResolvedConfig } from "vite";
 import type { PreloaderOptions, ResolvedRoute } from "./types";
 import { CodeGenerator } from "./generator";
+import type { OutputBundleCompat } from "./generator";
 
 export default function preloaderPlugin(
   userOptions: PreloaderOptions = {},
 ): Plugin {
   // 合并默认配置，所有字段都有明确默认值，routes 防御校验确保始终为数组
+  // debug 默认值依赖 command，先占位、在 configResolved 中最终确定
   const options: Required<PreloaderOptions> = {
     routes: Array.isArray(userOptions.routes) ? userOptions.routes : [],
     delay: userOptions.delay ?? 2000,
-    debug: userOptions.debug ?? process.env.NODE_ENV !== 'production',
+    debug: userOptions.debug ?? false,
     showStatus: userOptions.showStatus ?? true,
     statusPosition: userOptions.statusPosition ?? 'bottom-right',
     exclude: userOptions.exclude ?? [],
+    strategy: userOptions.strategy ?? 'all',
   };
 
   const generator = new CodeGenerator(options);
   let resolvedRoutes: ResolvedRoute[] = [];
   let isBuild = false;
+  // dev 注入片段缓存：routes 在 configResolved 后不再变化，避免每个请求重算
+  let devInjectCache: string | null = null;
 
   return {
     name: "vite-plugin-preloader",
@@ -40,9 +45,9 @@ export default function preloaderPlugin(
       return !isSsrBuild;
     },
 
-    // ✅ 正确读取 viteConfig：alias、root、command
     configResolved(config: ResolvedConfig) {
       isBuild = config.command === "build";
+      options.debug = userOptions.debug ?? !isBuild;
       generator.setViteConfig(config);
       resolvedRoutes = generator.resolveRoutes();
 
@@ -57,15 +62,34 @@ export default function preloaderPlugin(
         );
         if (!isBuild) {
           console.log(
-            '   开发模式：注入 <link rel="modulepreload">，生产构建后切换为 <link rel="prefetch">',
+            '   开发模式：注入 <link rel="modulepreload">，生产构建由运行时脚本在 load 后注入 <link rel="prefetch">',
           );
         }
       }
     },
 
-    // ✅ 生产构建阶段：扫描 bundle，为路由匹配真实 chunk hash 路径
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    generateBundle(_opts: unknown, bundle: Record<string, any>) {
+    // 仅 dev：modulepreload 静态注入 + 状态/调试脚本
+    // build 时 HTML 由 generateBundle 直改 asset（见下），此处直通返回
+    transformIndexHtml(html: string) {
+      if (isBuild) return html;
+
+      if (devInjectCache === null) {
+        devInjectCache = [
+          generator.generateLinkTags(resolvedRoutes),
+          generator.generateRuntimeScript(resolvedRoutes, isBuild),
+        ]
+          .filter(Boolean)
+          .join("\n");
+      }
+      if (!devInjectCache) return html;
+
+      return generator.injectIntoHtml(html, devInjectCache);
+    },
+
+    // 生产构建阶段：
+    //   1. 扫描 bundle，为路由匹配真实 chunk hash 路径（含 base）
+    //   2. 把运行时脚本（prefetch 注入器 + 可选状态/调试）写进所有 HTML asset
+    generateBundle(_opts: unknown, bundle: OutputBundleCompat) {
       if (!isBuild) return;
       resolvedRoutes = generator.fillChunkPaths(resolvedRoutes, bundle);
 
@@ -77,38 +101,23 @@ export default function preloaderPlugin(
         );
         unmatched.forEach((r) => {
           console.warn(
-            `   ⚠️  未找到 chunk：${r.path} → ${r.component}（组件路径可能不匹配）`,
+            `   ⚠️  未找到 chunk：${r.path} → ${r.component}（组件路径可能不匹配，或组件未使用动态 import 而无独立 chunk）`,
           );
         });
       }
-    },
 
-    // ✅ 注入 <link> 标签 + 可选运行时脚本到 </body> 前
-    transformIndexHtml(html: string) {
-      const linkTags = generator.generateLinkTags(resolvedRoutes, isBuild);
-      const runtimeScript = generator.generateRuntimeScript(
-        resolvedRoutes,
-        isBuild,
-      );
+      const runtimeScript = generator.generateRuntimeScript(resolvedRoutes, isBuild);
+      if (!runtimeScript) return;
 
-      const inject = [linkTags, runtimeScript].filter(Boolean).join("\n");
-      if (!inject) return html;
-
-      // 注入到 </body> 前（脚本依赖 DOM 和 Vue 已挂载）
-      if (html.includes("</body>")) {
-        return html.replace("</body>", `${inject}\n</body>`);
+      for (const asset of Object.values(bundle)) {
+        if (asset.type !== "asset" || !asset.fileName?.endsWith(".html")) continue;
+        const wasBinary = typeof asset.source !== "string";
+        const html = wasBinary
+          ? Buffer.from(asset.source as Uint8Array).toString("utf8")
+          : (asset.source as string);
+        const next = generator.injectIntoHtml(html, runtimeScript);
+        asset.source = wasBinary ? new Uint8Array(Buffer.from(next, "utf8")) : next;
       }
-      // 兜底：追加到末尾
-      return html + "\n" + inject;
-    },
-
-    // HMR：vite.config 变更时触发完整刷新
-    handleHotUpdate(ctx) {
-      if (ctx.file.includes("vite.config")) {
-        ctx.server.ws.send({ type: "full-reload" });
-        return [];
-      }
-      return undefined;
     },
   };
 }
@@ -117,5 +126,6 @@ export default function preloaderPlugin(
 export {
   type PreloaderOptions,
   type PreloadRoute,
+  type PreloadStrategy,
   type StatusPosition,
 } from "./types";

@@ -1,10 +1,11 @@
 {
   "name": "vite-plugin-preloader",
-  "version": "2.0.3",
-  "description": "Vite 智能路由预加载插件 - dev 注入 modulepreload，build 注入 prefetch",
+  "version": "2.2.0",
+  "description": "Vite 智能路由预加载插件 - dev 注入 modulepreload，build 运行时注入 prefetch",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
       "import": {
@@ -40,7 +41,7 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "prepublishOnly": "npm run build",
-    "test": "vitest",
+    "test": "vitest run",
     "test:watch": "vitest --watch",
     "format": "prettier --write src/",
     "type-check": "tsc --noEmit"
@@ -50,18 +51,14 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.9",
-    "@typescript-eslint/eslint-plugin": "^8.0.0",
-    "@typescript-eslint/parser": "^8.0.0",
-    "eslint": "^9.21.0",
     "prettier": "^3.5.3",
     "tsup": "^8.3.5",
     "typescript": "~5.8.0",
     "vite": "^8.0.1",
-    "vitest": "^3.0.8",
-    "vue": "^3.5.13"
+    "vitest": "^3.0.8"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.19.0"
   },
   "author": "CHENY <ycyplus@gmail.com>",
   "license": "MIT",

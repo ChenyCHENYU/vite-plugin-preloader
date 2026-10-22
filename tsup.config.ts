@@ -26,8 +26,8 @@ export default defineConfig({
   // 🚫 不分包（插件通常是单文件）
   splitting: false,
   
-  // 🎯 外部依赖（不打包进最终文件）
-  external: ['vite', 'vue'],
+  // 🎯 外部依赖（vite 为 peer dependency，不打包进最终文件）
+  external: ['vite'],
   
   // 🏷️ 添加版权信息
   banner: {
